@@ -12,17 +12,17 @@
 
 # %%
 """
-Diamond Price Prediction Ensemble Framework
+Diamond Price Prediction Stackup Framework
 
-This module contains the complete ensemble framework for diamond price prediction using:
+This module contains the complete stackup framework for diamond price prediction using:
 1. A classifier to predict price tiers (low/medium/high)
 2. Tier-specific regression models for accurate price prediction
 3. Automatic routing of new diamonds to appropriate models
 
 Usage:
 1. Train your tier-specific models and classifier in your main notebook
-2. Import this ensemble framework
-3. Create ensemble instance with your trained models
+2. Import this stackup framework
+3. Create stackup instance with your trained models
 4. Use for prediction on new diamond data
 """
 
@@ -43,9 +43,9 @@ import diamonds_utils as du
 
 
 # %%
-class DiamondPriceEnsemble:
+class DiamondPriceStackup:
     """
-    Ensemble model that combines a classifier and tier-specific regression models.
+    Stackup model that combines a classifier and tier-specific regression models.
     
     Workflow:
     1. Classifier predicts price tier (low/medium/high)
@@ -89,7 +89,7 @@ class DiamondPriceEnsemble:
     
     def predict_price(self, X):
         """
-        Predict price using ensemble approach for single or few samples.
+        Predict price using stackup approach for single or few samples.
         
         Args:
             X (pandas.DataFrame): Diamond features
@@ -162,9 +162,9 @@ class DiamondPriceEnsemble:
         
         return price_predictions, tier_names, confidence_scores
     
-    def evaluate_ensemble(self, X_test, y_test, low_threshold=2500, high_threshold=6000):
+    def evaluate_stackup(self, X_test, y_test, low_threshold=2500, high_threshold=6000):
         """
-        Evaluate the ensemble model performance.
+        Evaluate the stackup model performance.
         
         Args:
             X_test (pandas.DataFrame): Test features
@@ -202,7 +202,7 @@ class DiamondPriceEnsemble:
         
         tier_accuracy = np.mean(tier_preds == actual_tiers)
         
-        print(f"Ensemble Performance:")
+        print(f"Stackup Performance:")
         print(f"  MAE: ${mae:.2f}")
         print(f"  R²: {r2:.4f}")
         print(f"  MAPE: {mape:.2f}%")
@@ -222,7 +222,7 @@ class DiamondPriceEnsemble:
     
     def predict_single_diamond(self, carat, cut, color, clarity, depth, table, x, y, z):
         """
-        Predict price for a single diamond using the ensemble model.
+        Predict price for a single diamond using the stackup model.
         
         Args:
             carat, cut, color, clarity, depth, table, x, y, z: Diamond features
@@ -265,9 +265,9 @@ class DiamondPriceEnsemble:
 
 
 # %%
-def plot_ensemble_performance(y_test, y_pred, tier_preds, actual_tiers, confidence):
+def plot_stackup_performance(y_test, y_pred, tier_preds, actual_tiers, confidence):
     """
-    Create comprehensive visualization of ensemble performance.
+    Create comprehensive visualization of stackup performance.
     
     Args:
         y_test: Actual prices
@@ -344,10 +344,10 @@ def create_results_dataframe(y_test, y_pred, tier_preds, confidence):
 
 
 # %%
-def create_ensemble_from_trained_models(classifier_model, regression_models, preprocessors, 
+def create_stackup_from_trained_models(classifier_model, regression_models, preprocessors, 
                                        classifier_preprocessor, low_threshold=2500, high_threshold=6000):
     """
-    Convenience function to create ensemble from trained models.
+    Convenience function to create stackup from trained models.
     
     Args:
         classifier_model: Trained classifier model
@@ -358,25 +358,25 @@ def create_ensemble_from_trained_models(classifier_model, regression_models, pre
         high_threshold (int): High tier threshold
         
     Returns:
-        DiamondPriceEnsemble: Configured ensemble model
+        DiamondPriceStackup: Configured stackup model
     """
     # Create tier encoder
     tier_encoder = LabelEncoder()
     tier_encoder.fit(['low', 'medium', 'high'])
     
     # Prepare preprocessors dictionary
-    ensemble_preprocessors = {
+    stackup_preprocessors = {
         'low': preprocessors['low'],
         'medium': preprocessors['medium'], 
         'high': preprocessors['high'],
         'classifier': classifier_preprocessor
     }
     
-    # Create and return ensemble
-    return DiamondPriceEnsemble(
+    # Create and return stackup
+    return DiamondPriceStackup(
         classifier_model=classifier_model,
         regression_models=regression_models,
-        preprocessors=ensemble_preprocessors,
+        preprocessors=stackup_preprocessors,
         tier_encoder=tier_encoder
     )
 
@@ -385,16 +385,16 @@ def create_ensemble_from_trained_models(classifier_model, regression_models, pre
 # Example usage function
 def example_usage():
     """
-    Example of how to use the ensemble framework in your main notebook.
+    Example of how to use the stackup framework in your main notebook.
     """
     print("""
     # Example usage in your main notebook:
-    
-    # 1. Import the ensemble framework
-    from ensemble_framework import DiamondPriceEnsemble, create_ensemble_from_trained_models
-    
-    # 2. Create ensemble from your trained models
-    ensemble = create_ensemble_from_trained_models(
+
+    # 1. Import the stackup framework
+    from stackup_framework import DiamondPriceStackup, create_stackup_from_trained_models
+
+    # 2. Create stackup from your trained models
+    stackup = create_stackup_from_trained_models(
         classifier_model=classifier_model,
         regression_models=models,  # Your trained regression models dict
         preprocessors=preprocessors,  # Your trained preprocessors dict
@@ -404,7 +404,7 @@ def example_usage():
     )
     
     # 3. Predict single diamond
-    result = ensemble.predict_single_diamond(
+    result = stackup.predict_single_diamond(
         carat=1.0, cut='Ideal', color='G', clarity='VS1',
         depth=62.0, table=55, x=6.0, y=6.0, z=3.7
     )
@@ -413,8 +413,8 @@ def example_usage():
     print(f"Confidence: {result['confidence']:.4f}")
     
     # 4. Batch prediction
-    price_preds, tier_preds, confidence = ensemble.predict_batch(X_test)
-    
+    price_preds, tier_preds, confidence = stackup.predict_batch(X_test)
+
     # 5. Evaluate performance
-    results = ensemble.evaluate_ensemble(X_test, y_test)
+    results = stackup.evaluate_stackup(X_test, y_test)
     """)
