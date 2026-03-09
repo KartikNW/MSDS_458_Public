@@ -344,7 +344,182 @@ def create_results_dataframe(y_test, y_pred, tier_preds, confidence):
 
 
 # %%
-def create_stackup_from_trained_models(classifier_model, regression_models, preprocessors, 
+def train_tier_regression_models(
+    diamonds_train,
+    tier_configs,
+    numerical_features,
+    categorical_features,
+    low_threshold=2500,
+    high_threshold=6000,
+    random_state=42,
+):
+    """
+    Train tier-specific regression models using config dicts.
+
+    Args:
+        diamonds_train: Training DataFrame (already outlier-cleaned)
+        tier_configs: Dict of model configs per tier, e.g.
+            {
+                'low':    {'layers': [128, 64, 32], 'lr': 0.001, 'epochs': 50, 'batch_size': 32, 'patience': 3},
+                'medium': {'layers': [128, 64, 32], 'lr': 0.001, 'epochs': 50, 'batch_size': 32, 'patience': 3},
+                'high':   {'layers': [128, 64, 32], 'lr': 0.001, 'epochs': 50, 'batch_size': 32, 'patience': 3},
+            }
+        numerical_features: List of numerical feature column names
+        categorical_features: List of categorical feature column names
+        low_threshold: Price boundary between low and medium tiers
+        high_threshold: Price boundary between medium and high tiers
+        random_state: Random seed for train/val split
+
+    Returns:
+        tuple: (models, preprocessors, histories)
+            - models: dict with keys 'low', 'medium', 'high'
+            - preprocessors: dict with keys 'low', 'medium', 'high'
+            - histories: dict with keys 'low', 'medium', 'high'
+    """
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import Dense, Input
+
+    low_data, medium_data, high_data = du.split_data(
+        diamonds_train, low_threshold=low_threshold, high_threshold=high_threshold
+    )
+
+    models = {}
+    preprocessors = {}
+    histories = {}
+
+    for tier, data in [('low', low_data), ('medium', medium_data), ('high', high_data)]:
+        cfg = tier_configs[tier]
+        print(f"\n=== Training {tier.upper()} tier model ===")
+
+        X_processed, y_processed, preprocessor = du.prepare_data_without_split(
+            data, numerical_features, categorical_features, target='price'
+        )
+        preprocessors[tier] = preprocessor
+
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_processed, y_processed, test_size=0.2, random_state=random_state
+        )
+
+        layers_list = []
+        layers_list.append(Input(shape=(X_train.shape[1],)))
+        for units in cfg['layers']:
+            layers_list.append(Dense(units, activation='relu'))
+        layers_list.append(Dense(1))
+
+        tier_model = Sequential(layers_list)
+        tier_model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=cfg.get('lr', 0.001)),
+            loss='mse',
+            metrics=['mae', 'mape'],
+        )
+
+        history = tier_model.fit(
+            X_train, y_train,
+            epochs=cfg.get('epochs', 50),
+            batch_size=cfg.get('batch_size', 32),
+            validation_data=(X_val, y_val),
+            verbose=1,
+            callbacks=[tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=cfg.get('patience', 3),
+                restore_best_weights=True,
+            )],
+        )
+
+        models[tier] = tier_model
+        histories[tier] = history
+
+        du.evaluate_model(tier_model, X_val, y_val)
+        du.plot_training_history(history)
+        print(f"=== {tier.upper()} tier complete ===\n")
+
+    print("All tier models trained successfully!")
+    return models, preprocessors, histories
+
+
+# %%
+def train_tier_classifier(
+    diamonds_train,
+    classifier_config,
+    numerical_features,
+    categorical_features,
+    low_threshold=2500,
+    high_threshold=6000,
+):
+    """
+    Train a neural network classifier to predict price tiers.
+
+    Args:
+        diamonds_train: Training DataFrame (already outlier-cleaned)
+        classifier_config: Model config dict, e.g.
+            {
+                'layers': [256, 128, 64],
+                'dropout': 0.2,
+                'lr': 0.001,
+                'epochs': 50,
+                'batch_size': 32,
+                'patience': 10,
+            }
+        numerical_features: List of numerical feature column names
+        categorical_features: List of categorical feature column names
+        low_threshold: Price boundary between low and medium tiers
+        high_threshold: Price boundary between medium and high tiers
+
+    Returns:
+        tuple: (classifier_model, preprocessor, history)
+    """
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import Dense, Input, Dropout
+
+    diamonds_tiers_train = du.create_price_tiers(
+        diamonds_train, low_threshold=low_threshold, high_threshold=high_threshold
+    )
+    diamonds_tiers_train = diamonds_tiers_train.drop(columns=['price'])
+
+    X_train, X_test, y_train, y_test, preprocessor = du.prepare_data(
+        diamonds_tiers_train, numerical_features, categorical_features,
+        target='price_tier', encode_target=True,
+    )
+
+    cfg = classifier_config
+    dropout_rate = cfg.get('dropout', 0.0)
+
+    layers_list = []
+    layers_list.append(Input(shape=(X_train.shape[1],)))
+    for units in cfg['layers']:
+        layers_list.append(Dense(units, activation='relu'))
+        if dropout_rate > 0:
+            layers_list.append(Dropout(dropout_rate))
+    layers_list.append(Dense(3, activation='softmax'))
+
+    classifier_model = Sequential(layers_list)
+    classifier_model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=cfg.get('lr', 0.001)),
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy'],
+    )
+    classifier_model.summary()
+
+    history = classifier_model.fit(
+        X_train, y_train,
+        epochs=cfg.get('epochs', 50),
+        batch_size=cfg.get('batch_size', 32),
+        validation_data=(X_test, y_test),
+        callbacks=[tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=cfg.get('patience', 10),
+            restore_best_weights=True,
+        )],
+    )
+
+    loss, accuracy = classifier_model.evaluate(X_test, y_test)
+    print(f"Classifier — Test Loss: {loss:.4f}, Test Accuracy: {accuracy:.4f}")
+
+    return classifier_model, preprocessor, history
+
+
+# %%
+def create_stackup_from_trained_models(classifier_model, regression_models, preprocessors,
                                        classifier_preprocessor, low_threshold=2500, high_threshold=6000):
     """
     Convenience function to create stackup from trained models.
