@@ -129,7 +129,7 @@ def compute_bleu_for_code(prompt, reference_code, generate_fn, bleu_metric, mode
     return bleu_score, is_valid_syntax, generated_code
 
 
-def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric, model_label="model"):
+def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric, model_label="model", generated_codes=None):
     """
     Evaluate a model on entire test set using BLEU metric.
 
@@ -139,9 +139,13 @@ def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric,
     Args:
         test_prompts (list): List of problem descriptions (strings)
         test_codes (list): List of reference code solutions (strings)
-        generate_fn (callable): Function that takes (prompt) and returns generated code
+        generate_fn (callable): Function that takes (prompt) and returns generated code.
+                                Ignored if generated_codes is provided.
         bleu_metric: Loaded BLEU metric from evaluate library
         model_label (str): String label for this evaluation (e.g., "zero-shot", "fine-tuned")
+        generated_codes (list, optional): Pre-generated codes (e.g., from batch generation).
+                                          If provided, skips calling generate_fn and scores
+                                          these directly. Use this for faster evaluation.
 
     Returns:
         tuple: (bleu_scores, syntax_valid, generated_codes, stats_dict)
@@ -165,30 +169,66 @@ def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric,
         ...     prompts, codes, my_gen, bleu_metric, "test-model"
         ... )
         >>> print(f"Mean BLEU: {stats['mean']:.2f}")
+        >>>
+        >>> # Or with pre-generated codes (skips generation, much faster):
+        >>> pre_gen = ["def a(): pass", "def b(): pass"]
+        >>> scores, valid, gen, stats = evaluate_model_with_bleu(
+        ...     prompts, codes, None, bleu_metric, "test-model",
+        ...     generated_codes=pre_gen
+        ... )
     """
-    print(f"🔬 Evaluating {model_label.upper()} model on {len(test_prompts)} test examples...")
-    print(f"This will take ~2-3 minutes (generating code for each example)")
+    using_pregenerated = generated_codes is not None
+    if using_pregenerated:
+        print(f"🔬 Scoring {model_label.upper()} on {len(test_prompts)} test examples (pre-generated)...")
+    else:
+        print(f"🔬 Evaluating {model_label.upper()} model on {len(test_prompts)} test examples...")
+        print(f"This will take ~2-3 minutes (generating code for each example)")
     print("=" * 80)
 
     # Storage for results
     bleu_scores = []
     syntax_valid = []
-    generated_codes = []
+    scored_codes = []
 
     # Evaluate each test example
     for i in tqdm(range(len(test_prompts)), desc=f"{model_label} BLEU Evaluation"):
         prompt = test_prompts[i]
         reference = test_codes[i]
 
-        # Use helper function to compute metrics
-        bleu_score, is_valid, generated = compute_bleu_for_code(
-            prompt, reference, generate_fn, bleu_metric, model_label=model_label
-        )
+        if using_pregenerated:
+            # Use pre-generated code — just compute BLEU + syntax validity
+            generated = generated_codes[i]
+            generated_clean = generated.strip()
+            reference_clean = reference.strip()
+
+            if not generated_clean:
+                bleu_score = 0.0
+                is_valid = False
+            else:
+                try:
+                    bleu_result = bleu_metric.compute(
+                        predictions=[generated_clean],
+                        references=[[reference_clean]]
+                    )
+                    bleu_score = bleu_result['bleu'] * 100
+                except (ZeroDivisionError, ValueError):
+                    bleu_score = 0.0
+
+                try:
+                    ast.parse(generated_clean)
+                    is_valid = True
+                except (SyntaxError, ValueError):
+                    is_valid = False
+        else:
+            # Generate on-the-fly using callback
+            bleu_score, is_valid, generated = compute_bleu_for_code(
+                prompt, reference, generate_fn, bleu_metric, model_label=model_label
+            )
 
         # Store results
         bleu_scores.append(bleu_score)
         syntax_valid.append(is_valid)
-        generated_codes.append(generated)
+        scored_codes.append(generated)
 
     # Compute statistics
     syntax_valid_count = sum(syntax_valid)
@@ -217,7 +257,7 @@ def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric,
     print("=" * 80)
     print(f"\n✅ {model_label} evaluation complete!")
 
-    return bleu_scores, syntax_valid, generated_codes, stats
+    return bleu_scores, syntax_valid, scored_codes, stats
 
 
 def analyze_bleu_results(bleu_scores, syntax_valid, generated_codes, test_prompts, test_codes, stats, model_label="model"):
