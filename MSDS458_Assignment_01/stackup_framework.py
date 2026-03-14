@@ -29,11 +29,8 @@ Usage:
 # %%
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
-from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import r2_score, mean_absolute_error
 import tensorflow as tf
 
@@ -264,84 +261,6 @@ class DiamondPriceStackup:
         }
 
 
-# %%
-def plot_stackup_performance(y_test, y_pred, tier_preds, actual_tiers, confidence):
-    """
-    Create comprehensive visualization of stackup performance.
-    
-    Args:
-        y_test: Actual prices
-        y_pred: Predicted prices
-        tier_preds: Predicted tiers
-        actual_tiers: Actual tiers
-        confidence: Prediction confidence scores
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-
-    # 1. Actual vs Predicted Prices
-    axes[0, 0].scatter(y_test, y_pred, alpha=0.6)
-    axes[0, 0].plot([y_test.min(), y_test.max()], 
-                    [y_test.min(), y_test.max()], 'r--', lw=2)
-    axes[0, 0].set_xlabel('Actual Price')
-    axes[0, 0].set_ylabel('Predicted Price')
-    axes[0, 0].set_title('Actual vs Predicted Prices')
-    axes[0, 0].grid(True, alpha=0.3)
-
-    # 2. Prediction Errors
-    errors = np.abs(y_test - y_pred)
-    axes[0, 1].hist(errors, bins=20, alpha=0.7, edgecolor='black')
-    axes[0, 1].set_xlabel('Absolute Error ($)')
-    axes[0, 1].set_ylabel('Frequency')
-    axes[0, 1].set_title('Distribution of Prediction Errors')
-    axes[0, 1].grid(True, alpha=0.3)
-
-    # 3. Tier Prediction Accuracy
-    tier_counts = pd.Series(tier_preds).value_counts()
-    actual_tier_counts = pd.Series(actual_tiers).value_counts()
-    tier_comparison = pd.DataFrame({
-        'Predicted': tier_counts,
-        'Actual': actual_tier_counts
-    }).fillna(0)
-    tier_comparison.plot(kind='bar', ax=axes[1, 0])
-    axes[1, 0].set_title('Tier Prediction vs Actual Distribution')
-    axes[1, 0].set_xlabel('Price Tier')
-    axes[1, 0].set_ylabel('Count')
-    axes[1, 0].tick_params(axis='x', rotation=45)
-
-    # 4. Confidence vs Error
-    axes[1, 1].scatter(confidence, errors, alpha=0.6)
-    axes[1, 1].set_xlabel('Prediction Confidence')
-    axes[1, 1].set_ylabel('Absolute Error ($)')
-    axes[1, 1].set_title('Confidence vs Prediction Error')
-    axes[1, 1].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
-
-
-# %%
-def create_results_dataframe(y_test, y_pred, tier_preds, confidence):
-    """
-    Create a results DataFrame for analysis.
-    
-    Args:
-        y_test: Actual prices
-        y_pred: Predicted prices
-        tier_preds: Predicted tiers
-        confidence: Prediction confidence scores
-        
-    Returns:
-        pandas.DataFrame: Results summary
-    """
-    return pd.DataFrame({
-        'Actual_Price': y_test,
-        'Predicted_Price': y_pred,
-        'Predicted_Tier': tier_preds,
-        'Confidence': confidence,
-        'Error': np.abs(y_test - y_pred),
-        'Percentage_Error': np.abs((y_test - y_pred) / y_test) * 100
-    })
-
 
 # %%
 def train_tier_regression_models(
@@ -555,41 +474,3 @@ def create_stackup_from_trained_models(classifier_model, regression_models, prep
         tier_encoder=tier_encoder
     )
 
-
-# %%
-# Example usage function
-def example_usage():
-    """
-    Example of how to use the stackup framework in your main notebook.
-    """
-    print("""
-    # Example usage in your main notebook:
-
-    # 1. Import the stackup framework
-    from stackup_framework import DiamondPriceStackup, create_stackup_from_trained_models
-
-    # 2. Create stackup from your trained models
-    stackup = create_stackup_from_trained_models(
-        classifier_model=classifier_model,
-        regression_models=models,  # Your trained regression models dict
-        preprocessors=preprocessors,  # Your trained preprocessors dict
-        classifier_preprocessor=preprocessor,  # Classifier preprocessor
-        low_threshold=2500,
-        high_threshold=6000
-    )
-    
-    # 3. Predict single diamond
-    result = stackup.predict_single_diamond(
-        carat=1.0, cut='Ideal', color='G', clarity='VS1',
-        depth=62.0, table=55, x=6.0, y=6.0, z=3.7
-    )
-    print(f"Predicted Price: ${result['predicted_price']:.2f}")
-    print(f"Predicted Tier: {result['predicted_tier']}")
-    print(f"Confidence: {result['confidence']:.4f}")
-    
-    # 4. Batch prediction
-    price_preds, tier_preds, confidence = stackup.predict_batch(X_test)
-
-    # 5. Evaluate performance
-    results = stackup.evaluate_stackup(X_test, y_test)
-    """)

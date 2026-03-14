@@ -167,76 +167,25 @@ def extract_mbpp_example(example):
         return None, None
 
 
-def extract_codecontests_example(example):
-    """
-    Extract description and Python code from CodeContests dataset example.
-
-    Args:
-        example (dict): CodeContests example with keys 'description' and 'solutions'.
-
-    Returns:
-        tuple: (description, code) or (None, None) if no Python solution found.
-
-    Note:
-        - Truncates description to 500 characters
-        - Only returns Python solutions (language code 3)
-        - Returns first valid Python solution
-
-    Example:
-        >>> example = {
-        ...     'description': 'Problem description...',
-        ...     'solutions': {'language': [3, 1], 'solution': ['python_code', 'cpp_code']}
-        ... }
-        >>> prompt, code = extract_codecontests_example(example)
-    """
-    try:
-        # Extract and truncate description
-        description = example['description']
-        if len(description) > 500:
-            description = description[:500] + "..."
-
-        # Extract solutions
-        solutions = example['solutions']
-        languages = solutions['language']
-        codes = solutions['solution']
-
-        # Find first Python solution (language code 3)
-        for lang, code in zip(languages, codes):
-            if lang == 3:  # Python
-                return description, code
-
-        # No Python solution found
-        return None, None
-    except (KeyError, TypeError, IndexError):
-        return None, None
-
-
 def extract_example(example, dataset_name=None):
     """
-    Extract prompt and code from example using appropriate extractor.
+    Extract prompt and code from MBPP dataset example.
 
     Args:
         example (dict): Dataset example.
-        dataset_name (str, optional): Dataset name ("MBPP" or "CodeContests").
-                                      If None, uses global DATASET variable.
+        dataset_name (str, optional): Dataset name. If None, uses global DATASET variable.
 
     Returns:
         tuple: (prompt, code) or (None, None) if extraction fails.
 
     Example:
-        >>> # For MBPP
         >>> prompt, code = extract_example(mbpp_example, "MBPP")
-
-        >>> # For CodeContests
-        >>> prompt, code = extract_example(cc_example, "CodeContests")
     """
     if dataset_name is None:
         dataset_name = DATASET
 
     if dataset_name == "MBPP":
         return extract_mbpp_example(example)
-    elif dataset_name == "CodeContests":
-        return extract_codecontests_example(example)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1283,7 +1232,6 @@ __all__ = [
     # Data loading
     "load_dataset_splits",
     "extract_mbpp_example",
-    "extract_codecontests_example",
     "extract_example",
     # Data processing
     "process_dataset_split",
