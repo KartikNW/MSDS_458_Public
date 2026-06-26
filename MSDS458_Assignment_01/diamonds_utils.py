@@ -210,6 +210,49 @@ def create_classifier_model(input_dim, num_classes):
     )
     return model
 
+def _select_feature_columns(diamonds, numerical_features, categorical_features, target):
+    """Validate the feature lists and return an explicit feature-only DataFrame (allowlist).
+
+    Only the columns named in `numerical_features` / `categorical_features` become model
+    inputs. This prevents any other column in the dataframe (for example a transformed
+    copy of the target) from silently being used as a feature.
+
+    Rules:
+      - Hard error if `target` appears in either feature list (this would be data leakage).
+      - Warn (and skip) if a named feature column is missing from the dataframe.
+
+    Returns:
+        tuple: (X, numerical_present, categorical_present)
+    """
+    leaked = [c for c in (list(numerical_features) + list(categorical_features)) if c == target]
+    if leaked:
+        raise ValueError(
+            f"prepare_data(): target '{target}' is listed as a feature "
+            f"{numerical_features=} {categorical_features=}. Remove it from the feature "
+            f"lists — using the target as an input is data leakage."
+        )
+
+    numerical_present = [c for c in numerical_features if c in diamonds.columns]
+    categorical_present = [c for c in categorical_features if c in diamonds.columns]
+    missing = [c for c in (list(numerical_features) + list(categorical_features))
+               if c not in diamonds.columns]
+    if missing:
+        print(f"⚠️  prepare_data(): named feature column(s) not in dataframe, skipping: {missing}")
+
+    # Allowlist: only the named feature columns become inputs; any other column in the
+    # dataframe is never passed through.
+    X = diamonds[numerical_present + categorical_present].copy()
+    return X, numerical_present, categorical_present
+
+
+def _print_prepare_summary(target, numerical_present, categorical_present, n_output_cols):
+    """Print what actually went into the model, so students can verify the feature set."""
+    print(f"prepare_data(): target = '{target}'")
+    print(f"  numerical   ({len(numerical_present)}): {numerical_present}")
+    print(f"  categorical ({len(categorical_present)}): {categorical_present}")
+    print(f"  output feature columns: {n_output_cols}")
+
+
 def prepare_data(diamonds, numerical_features, categorical_features, target='price', encode_target=False):
     """Prepare the data for model training by handling categorical variables and scaling numerical features.
 
@@ -223,8 +266,10 @@ def prepare_data(diamonds, numerical_features, categorical_features, target='pri
     Returns:
         tuple: (X_train_processed, X_test_processed, y_train_processed, y_test_processed, preprocessor)
     """
-    # Separate features and target
-    X = diamonds.drop(target, axis=1)
+    # Separate features (allowlist) and target
+    X, numerical_present, categorical_present = _select_feature_columns(
+        diamonds, numerical_features, categorical_features, target
+    )
     y = diamonds[target]
 
     # Split the data
@@ -232,15 +277,16 @@ def prepare_data(diamonds, numerical_features, categorical_features, target='pri
 
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', StandardScaler(), numerical_features),
-            ('cat', OneHotEncoder(drop='first', sparse_output=False), categorical_features)
+            ('num', StandardScaler(), numerical_present),
+            ('cat', OneHotEncoder(drop='first', sparse_output=False), categorical_present)
         ],
-        remainder='passthrough'
+        remainder='drop'
     )
 
     # Apply preprocessing
     X_train_processed = preprocessor.fit_transform(X_train)
     X_test_processed = preprocessor.transform(X_test)
+    _print_prepare_summary(target, numerical_present, categorical_present, X_train_processed.shape[1])
 
     # if encode_target is True, encode the target variable
     if encode_target:
@@ -272,20 +318,23 @@ def prepare_data_without_split(diamonds, numerical_features, categorical_feature
     Returns:
         tuple: (X_processed, y_processed, preprocessor)
     """
-    # Separate features and target
-    X = diamonds.drop(target, axis=1)
+    # Separate features (allowlist) and target
+    X, numerical_present, categorical_present = _select_feature_columns(
+        diamonds, numerical_features, categorical_features, target
+    )
     y = diamonds[target]
 
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', StandardScaler(), numerical_features),
-            ('cat', OneHotEncoder(drop='first', sparse_output=False), categorical_features)
+            ('num', StandardScaler(), numerical_present),
+            ('cat', OneHotEncoder(drop='first', sparse_output=False), categorical_present)
         ],
-        remainder='passthrough'
+        remainder='drop'
     )
 
     # Apply preprocessing
     X_processed = preprocessor.fit_transform(X)
+    _print_prepare_summary(target, numerical_present, categorical_present, X_processed.shape[1])
 
     # if encode_target is True, encode the target variable
     if encode_target:
