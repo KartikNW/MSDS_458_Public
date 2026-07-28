@@ -53,7 +53,7 @@ DATASET_CONFIG = {
         "max_train": 374,
         "max_val": 90,
         "max_test": 50,
-        "name": "mbpp",
+        "name": "google-research-datasets/mbpp",
         "config": "full",  # Use 'full' configuration (374/90/500 examples)
         "train_split": "train",
         "val_split": "validation",
@@ -1227,7 +1227,7 @@ def sequential_generate_codes(prompts, generate_fn, desc="Generating code"):
 # MODULE INFO
 # ============================================
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __all__ = [
     # Configuration
     "DATASET",
