@@ -24,7 +24,16 @@ Date: December 2025
 from datasets import load_dataset
 
 # Numerical operations
+import math
 import numpy as np
+
+# PyTorch (transformer building blocks, decoding, batch generation)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Vocabulary building (TextVectorizer)
+from collections import Counter
 
 # Syntax validation
 import ast
@@ -215,7 +224,7 @@ def process_dataset_split(split_data, dataset_name, max_examples):
         Extracted 374 examples
     """
     prompts = []
-    codes = []
+    code_list = []
     count = 0
 
     for example in split_data:
@@ -226,12 +235,12 @@ def process_dataset_split(split_data, dataset_name, max_examples):
 
         if prompt is not None and code is not None:
             prompts.append(prompt)
-            codes.append(code)
+            code_list.append(code)
             count += 1
 
     return {
         'prompts': prompts,
-        'code': codes
+        'code': code_list
     }
 
 
@@ -417,7 +426,7 @@ def compute_bleu_for_code(prompt, reference_code, generate_fn, bleu_metric, mode
     return bleu_score, is_valid_syntax, generated_code
 
 
-def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric, model_label="model", generated_codes=None):
+def evaluate_model_with_bleu(test_prompts, test_code, generate_fn, bleu_metric, model_label="model", generated_code=None):
     """
     Evaluate a model on entire test set using BLEU metric.
 
@@ -426,20 +435,20 @@ def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric,
 
     Args:
         test_prompts (list): List of problem descriptions (strings)
-        test_codes (list): List of reference code solutions (strings)
+        test_code (list): List of reference code solutions (strings)
         generate_fn (callable): Function that takes (prompt) and returns generated code.
-                                Ignored if generated_codes is provided.
+                                Ignored if generated_code is provided.
         bleu_metric: Loaded BLEU metric from evaluate library
         model_label (str): String label for this evaluation (e.g., "zero-shot", "fine-tuned")
-        generated_codes (list, optional): Pre-generated codes (e.g., from batch generation).
-                                          If provided, skips calling generate_fn and scores
-                                          these directly. Use this for faster evaluation.
+        generated_code (list, optional): Pre-generated code (e.g., from batch generation).
+                                         If provided, skips calling generate_fn and scores
+                                         these directly. Use this for faster evaluation.
 
     Returns:
-        tuple: (bleu_scores, syntax_valid, generated_codes, stats_dict)
+        tuple: (bleu_scores, syntax_valid, generated_code, stats_dict)
             - bleu_scores (list): BLEU score for each example
             - syntax_valid (list): Boolean for each example indicating syntax validity
-            - generated_codes (list): Generated code for each example
+            - generated_code (list): Generated code for each example
             - stats_dict (dict): Statistics with keys:
                 - 'mean', 'median', 'std', 'min', 'max': BLEU statistics
                 - 'syntax_valid_count': Number of syntactically valid examples
@@ -447,25 +456,25 @@ def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric,
 
     Example:
         >>> prompts = ["Write function A", "Write function B"]
-        >>> codes = ["def a(): pass", "def b(): pass"]
+        >>> reference_code = ["def a(): pass", "def b(): pass"]
         >>>
         >>> def my_gen(p):
         ...     return "def solution(): pass"
         >>>
         >>> bleu_metric = evaluate.load("bleu")
         >>> scores, valid, gen, stats = evaluate_model_with_bleu(
-        ...     prompts, codes, my_gen, bleu_metric, "test-model"
+        ...     prompts, reference_code, my_gen, bleu_metric, "test-model"
         ... )
         >>> print(f"Mean BLEU: {stats['mean']:.2f}")
         >>>
-        >>> # Or with pre-generated codes (skips generation, much faster):
+        >>> # Or with pre-generated code (skips generation, much faster):
         >>> pre_gen = ["def a(): pass", "def b(): pass"]
         >>> scores, valid, gen, stats = evaluate_model_with_bleu(
-        ...     prompts, codes, None, bleu_metric, "test-model",
-        ...     generated_codes=pre_gen
+        ...     prompts, reference_code, None, bleu_metric, "test-model",
+        ...     generated_code=pre_gen
         ... )
     """
-    using_pregenerated = generated_codes is not None
+    using_pregenerated = generated_code is not None
     if using_pregenerated:
         print(f"🔬 Scoring {model_label.upper()} on {len(test_prompts)} test examples (pre-generated)...")
     else:
@@ -476,16 +485,16 @@ def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric,
     # Storage for results
     bleu_scores = []
     syntax_valid = []
-    scored_codes = []
+    scored_code = []
 
     # Evaluate each test example
     for i in tqdm(range(len(test_prompts)), desc=f"{model_label} BLEU Evaluation"):
         prompt = test_prompts[i]
-        reference = test_codes[i]
+        reference = test_code[i]
 
         if using_pregenerated:
             # Use pre-generated code — just compute BLEU + syntax validity
-            generated = generated_codes[i]
+            generated = generated_code[i]
             generated_clean = generated.strip()
             reference_clean = reference.strip()
 
@@ -516,7 +525,7 @@ def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric,
         # Store results
         bleu_scores.append(bleu_score)
         syntax_valid.append(is_valid)
-        scored_codes.append(generated)
+        scored_code.append(generated)
 
     # Compute statistics
     syntax_valid_count = sum(syntax_valid)
@@ -545,10 +554,10 @@ def evaluate_model_with_bleu(test_prompts, test_codes, generate_fn, bleu_metric,
     print("=" * 80)
     print(f"\n✅ {model_label} evaluation complete!")
 
-    return bleu_scores, syntax_valid, scored_codes, stats
+    return bleu_scores, syntax_valid, scored_code, stats
 
 
-def analyze_bleu_results(bleu_scores, syntax_valid, generated_codes, test_prompts, test_codes, stats, model_label="model"):
+def analyze_bleu_results(bleu_scores, syntax_valid, generated_code, test_prompts, test_code, stats, model_label="model"):
     """
     Visualize and analyze BLEU evaluation results.
 
@@ -558,9 +567,9 @@ def analyze_bleu_results(bleu_scores, syntax_valid, generated_codes, test_prompt
     Args:
         bleu_scores (list): BLEU score for each example
         syntax_valid (list): Boolean for each example indicating syntax validity
-        generated_codes (list): Generated code for each example
+        generated_code (list): Generated code for each example
         test_prompts (list): Problem descriptions
-        test_codes (list): Reference solutions
+        test_code (list): Reference solutions
         stats (dict): Statistics dictionary from evaluate_model_with_bleu()
         model_label (str): Model name for display
 
@@ -570,8 +579,8 @@ def analyze_bleu_results(bleu_scores, syntax_valid, generated_codes, test_prompt
     Example:
         >>> # After running evaluate_model_with_bleu:
         >>> analyze_bleu_results(
-        ...     bleu_scores, syntax_valid, generated_codes,
-        ...     test_prompts, test_codes, stats, "my-model"
+        ...     bleu_scores, syntax_valid, generated_code,
+        ...     test_prompts, test_code, stats, "my-model"
         ... )
         # Displays histogram, pie chart, and example outputs
     """
@@ -626,9 +635,9 @@ def analyze_bleu_results(bleu_scores, syntax_valid, generated_codes, test_prompt
         print(f"\n📝 Prompt:")
         print(test_prompts[idx][:150] + ("..." if len(test_prompts[idx]) > 150 else ""))
         print(f"\n🎯 Reference:")
-        print(test_codes[idx][:150] + ("..." if len(test_codes[idx]) > 150 else ""))
+        print(test_code[idx][:150] + ("..." if len(test_code[idx]) > 150 else ""))
         print(f"\n🤖 Generated ({model_label}):")
-        print(generated_codes[idx][:150] + ("..." if len(generated_codes[idx]) > 150 else ""))
+        print(generated_code[idx][:150] + ("..." if len(generated_code[idx]) > 150 else ""))
 
     print("\n" + "=" * 80)
     print(f"💔 WORST {model_label.upper()} EXAMPLES (Lowest BLEU)")
@@ -644,9 +653,9 @@ def analyze_bleu_results(bleu_scores, syntax_valid, generated_codes, test_prompt
         print(f"\n📝 Prompt:")
         print(test_prompts[idx][:150] + ("..." if len(test_prompts[idx]) > 150 else ""))
         print(f"\n🎯 Reference:")
-        print(test_codes[idx][:150] + ("..." if len(test_codes[idx]) > 150 else ""))
+        print(test_code[idx][:150] + ("..." if len(test_code[idx]) > 150 else ""))
         print(f"\n🤖 Generated ({model_label}):")
-        print(generated_codes[idx][:150] + ("..." if len(generated_codes[idx]) > 150 else ""))
+        print(generated_code[idx][:150] + ("..." if len(generated_code[idx]) > 150 else ""))
 
     print("\n" + "=" * 80)
     print(f"✅ {model_label} analysis complete!")
@@ -664,9 +673,11 @@ def plot_training_history(history_obj):
     Plot training and validation loss/accuracy curves.
 
     Args:
-        history_obj: Keras History object returned by model.fit()
+        history_obj: Either a plain dict with keys "loss", "val_loss",
+                     "accuracy", "val_accuracy" (as built by the PyTorch
+                     training loop) or an object with a `.history` dict.
     """
-    history_dict = history_obj.history
+    history_dict = history_obj.history if hasattr(history_obj, "history") else history_obj
 
     loss = history_dict["loss"]
     val_loss = history_dict.get("val_loss")
@@ -703,19 +714,78 @@ def plot_training_history(history_obj):
 
 
 # ============================================
+# SECTION 5B: TEXT VECTORIZATION (TOKENIZER)
+# ============================================
+# A small, dependency-free text vectorizer producing integer token ids.
+# Behavior: standardize → whitespace split → frequency-ranked vocabulary
+# with '' (padding, id 0) and '[UNK]' (OOV, id 1) reserved, fixed-length output.
+
+
+class TextVectorizer:
+    """
+    Simple whitespace tokenizer + vocabulary lookup.
+
+    - Index 0 is reserved for padding ('').
+    - Index 1 is reserved for out-of-vocabulary tokens ('[UNK]').
+    - Vocabulary is built by token frequency (most frequent first),
+      capped at max_tokens (including the two reserved slots).
+    - Output sequences are padded with 0 / truncated to output_sequence_length.
+
+    Args:
+        max_tokens: Maximum vocabulary size (including '' and '[UNK]')
+        output_sequence_length: Fixed output length per sequence
+        standardize: Callable applied to each string before splitting
+                     (default: lowercase)
+
+    Example:
+        >>> vectorizer = TextVectorizer(max_tokens=100, output_sequence_length=8)
+        >>> vectorizer.adapt(["write a function", "write a class"])
+        >>> vectorizer(["write a function"])
+        array([[2, 3, 4, 0, 0, 0, 0, 0]])
+    """
+
+    def __init__(self, max_tokens, output_sequence_length, standardize=None):
+        self.max_tokens = max_tokens
+        self.output_sequence_length = output_sequence_length
+        self.standardize = standardize if standardize is not None else (lambda s: s.lower())
+        self.vocab = ["", "[UNK]"]
+        self.token_to_id = {"": 0, "[UNK]": 1}
+
+    def adapt(self, texts):
+        """Build the vocabulary from an iterable of strings."""
+        counter = Counter()
+        for text in texts:
+            counter.update(self.standardize(str(text)).split())
+        most_common = counter.most_common(self.max_tokens - 2)
+        self.vocab = ["", "[UNK]"] + [tok for tok, _ in most_common]
+        self.token_to_id = {tok: i for i, tok in enumerate(self.vocab)}
+
+    def __call__(self, texts):
+        """Convert string(s) to an int array of shape (n, output_sequence_length)."""
+        if isinstance(texts, str):
+            texts = [texts]
+        seq_len = self.output_sequence_length
+        output = np.zeros((len(texts), seq_len), dtype="int64")
+        for row, text in enumerate(texts):
+            tokens = self.standardize(str(text)).split()[:seq_len]
+            for col, tok in enumerate(tokens):
+                output[row, col] = self.token_to_id.get(tok, 1)  # 1 = [UNK]
+        return output
+
+    def get_vocabulary(self):
+        """Return the vocabulary as a list of tokens (list index = token id)."""
+        return list(self.vocab)
+
+
+# ============================================
 # SECTION 6: TRANSFORMER BUILDING BLOCKS
 # ============================================
-# Core transformer components used in Part A.
+# Core transformer components used in Part A (PyTorch nn.Modules).
 # Reference: Vaswani et al., "Attention Is All You Need" (2017)
 #            https://arxiv.org/abs/1706.03762
 
-import math
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
 
-
-class PositionalEncoding(layers.Layer):
+class PositionalEncoding(nn.Module):
     """
     Sinusoidal positional encoding from the original Transformer paper.
 
@@ -728,8 +798,8 @@ class PositionalEncoding(layers.Layer):
         d_model: Embedding / model dimension
     """
 
-    def __init__(self, max_length, d_model, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, max_length, d_model):
+        super().__init__()
         self.max_length = max_length
         self.d_model = d_model
 
@@ -742,44 +812,33 @@ class PositionalEncoding(layers.Layer):
         pe[:, 0::2] = np.sin(position * div_term)
         pe[:, 1::2] = np.cos(position * div_term)
 
-        self.position_encoding = tf.constant(pe[np.newaxis, ...], dtype=tf.float32)
+        # Buffer (not a parameter): moves with the model to GPU/MPS, never trained
+        self.register_buffer("position_encoding", torch.from_numpy(pe).unsqueeze(0))
 
-    def call(self, inputs):
-        seq_len = tf.shape(inputs)[1]
+    def forward(self, inputs):
+        seq_len = inputs.size(1)
         return inputs + self.position_encoding[:, :seq_len, :]
 
-    def get_config(self):
-        config = super().get_config()
-        config.update({"max_length": self.max_length, "d_model": self.d_model})
-        return config
 
-
-class ScaledDotProductAttention(layers.Layer):
-    supports_masking = True
-
+class ScaledDotProductAttention(nn.Module):
     """
     Scaled dot-product attention.
 
     Attention(Q, K, V) = softmax(Q · K^T / sqrt(d_k)) · V
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def call(self, q, k, v, mask=None):
-        matmul_qk = tf.matmul(q, k, transpose_b=True)
-        dk = tf.cast(tf.shape(k)[-1], tf.float32)
-        scaled_scores = matmul_qk / tf.math.sqrt(dk)
+    def forward(self, q, k, v, mask=None):
+        matmul_qk = torch.matmul(q, k.transpose(-2, -1))
+        dk = k.size(-1)
+        scaled_scores = matmul_qk / math.sqrt(dk)
         if mask is not None:
-            scaled_scores += (mask * -1e9)
-        attention_weights = tf.nn.softmax(scaled_scores, axis=-1)
-        output = tf.matmul(attention_weights, v)
+            scaled_scores = scaled_scores + (mask * -1e9)
+        attention_weights = F.softmax(scaled_scores, dim=-1)
+        output = torch.matmul(attention_weights, v)
         return output, attention_weights
 
 
-class MultiHeadAttention(layers.Layer):
-    supports_masking = True
-
+class MultiHeadAttention(nn.Module):
     """
     Multi-head attention — runs scaled dot-product attention in parallel across heads.
 
@@ -788,24 +847,24 @@ class MultiHeadAttention(layers.Layer):
         num_heads: Number of parallel attention heads
     """
 
-    def __init__(self, d_model, num_heads, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, d_model, num_heads):
+        super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model = d_model
         self.num_heads = num_heads
         self.depth = d_model // num_heads
-        self.wq = layers.Dense(d_model)
-        self.wk = layers.Dense(d_model)
-        self.wv = layers.Dense(d_model)
-        self.dense = layers.Dense(d_model)
+        self.wq = nn.Linear(d_model, d_model)
+        self.wk = nn.Linear(d_model, d_model)
+        self.wv = nn.Linear(d_model, d_model)
+        self.dense = nn.Linear(d_model, d_model)
         self.attention = ScaledDotProductAttention()
 
     def split_heads(self, x, batch_size):
-        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
-        return tf.transpose(x, perm=[0, 2, 1, 3])
+        x = x.view(batch_size, -1, self.num_heads, self.depth)
+        return x.permute(0, 2, 1, 3)
 
-    def call(self, v, k, q, mask=None):
-        batch_size = tf.shape(q)[0]
+    def forward(self, v, k, q, mask=None):
+        batch_size = q.size(0)
         q = self.wq(q)
         k = self.wk(k)
         v = self.wv(v)
@@ -813,46 +872,42 @@ class MultiHeadAttention(layers.Layer):
         k = self.split_heads(k, batch_size)
         v = self.split_heads(v, batch_size)
         scaled_attention, attention_weights = self.attention(q, k, v, mask=mask)
-        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
-        concat_attention = tf.reshape(scaled_attention, (batch_size, -1, self.d_model))
+        scaled_attention = scaled_attention.permute(0, 2, 1, 3).contiguous()
+        concat_attention = scaled_attention.view(batch_size, -1, self.d_model)
         output = self.dense(concat_attention)
         return output, attention_weights
 
-    def get_config(self):
-        config = super().get_config()
-        config.update({"d_model": self.d_model, "num_heads": self.num_heads})
-        return config
-
 
 def create_padding_mask(seq):
-    """Create padding mask: 1 where token == 0. Shape: (batch, 1, 1, seq_len)."""
-    seq = tf.cast(tf.math.equal(seq, 0), tf.float32)
-    return seq[:, tf.newaxis, tf.newaxis, :]
+    """Create padding mask: 1.0 where token == 0. Shape: (batch, 1, 1, seq_len)."""
+    mask = (seq == 0).float()
+    return mask[:, None, None, :]
 
 
 def create_look_ahead_mask(seq_len):
     """Create causal look-ahead mask: 1 in upper triangle. Shape: (seq_len, seq_len)."""
-    return 1 - tf.linalg.band_part(tf.ones((seq_len, seq_len)), -1, 0)
+    return torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
 
 
 def create_decoder_mask(target_seq):
     """Combine padding and look-ahead masks for the decoder. Shape: (batch, 1, seq_len, seq_len)."""
-    seq_len = tf.shape(target_seq)[1]
-    look_ahead = create_look_ahead_mask(seq_len)
+    seq_len = target_seq.size(1)
+    look_ahead = create_look_ahead_mask(seq_len).to(target_seq.device)
     padding_mask = create_padding_mask(target_seq)
-    look_ahead = tf.reshape(look_ahead, (1, 1, seq_len, seq_len))
-    return tf.maximum(look_ahead, padding_mask)
+    look_ahead = look_ahead.view(1, 1, seq_len, seq_len)
+    return torch.maximum(look_ahead, padding_mask)
 
 
 def point_wise_feed_forward_network(d_model, d_ff):
-    """Position-wise feed-forward network: Dense(d_ff, relu) → Dense(d_model)."""
-    return keras.Sequential([
-        layers.Dense(d_ff, activation="relu"),
-        layers.Dense(d_model),
-    ])
+    """Position-wise feed-forward network: Linear(d_ff) + ReLU → Linear(d_model)."""
+    return nn.Sequential(
+        nn.Linear(d_model, d_ff),
+        nn.ReLU(),
+        nn.Linear(d_ff, d_model),
+    )
 
 
-class EncoderBlock(layers.Layer):
+class EncoderBlock(nn.Module):
     """
     Single encoder block: Self-Attention → Add & Norm → FFN → Add & Norm.
 
@@ -863,30 +918,25 @@ class EncoderBlock(layers.Layer):
         dropout_rate: Dropout probability
     """
 
-    def __init__(self, d_model, num_heads, d_ff, dropout_rate=0.1, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, d_model, num_heads, d_ff, dropout_rate=0.1):
+        super().__init__()
         self.mha = MultiHeadAttention(d_model=d_model, num_heads=num_heads)
         self.ffn = point_wise_feed_forward_network(d_model, d_ff)
-        self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
-        self.dropout1 = layers.Dropout(dropout_rate)
-        self.dropout2 = layers.Dropout(dropout_rate)
+        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
+        self.dropout1 = nn.Dropout(dropout_rate)
+        self.dropout2 = nn.Dropout(dropout_rate)
 
-    def call(self, x, padding_mask, training=False):
+    def forward(self, x, padding_mask):
         attn_output, _ = self.mha(v=x, k=x, q=x, mask=padding_mask)
-        attn_output = self.dropout1(attn_output, training=training)
+        attn_output = self.dropout1(attn_output)
         out1 = self.layernorm1(x + attn_output)
         ffn_output = self.ffn(out1)
-        ffn_output = self.dropout2(ffn_output, training=training)
+        ffn_output = self.dropout2(ffn_output)
         return self.layernorm2(out1 + ffn_output)
 
-    def get_config(self):
-        config = super().get_config()
-        config.update({"d_model": self.mha.d_model, "num_heads": self.mha.num_heads})
-        return config
 
-
-class DecoderBlock(layers.Layer):
+class DecoderBlock(nn.Module):
     """
     Single decoder block with three sub-layers:
     1. Masked Self-Attention  2. Cross-Attention  3. Feed-Forward Network
@@ -898,30 +948,100 @@ class DecoderBlock(layers.Layer):
         dropout_rate: Dropout probability
     """
 
-    def __init__(self, d_model, num_heads, d_ff, dropout_rate=0.1, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, d_model, num_heads, d_ff, dropout_rate=0.1):
+        super().__init__()
         self.mha1 = MultiHeadAttention(d_model=d_model, num_heads=num_heads)
         self.mha2 = MultiHeadAttention(d_model=d_model, num_heads=num_heads)
         self.ffn = point_wise_feed_forward_network(d_model, d_ff)
-        self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm3 = layers.LayerNormalization(epsilon=1e-6)
-        self.dropout1 = layers.Dropout(dropout_rate)
-        self.dropout2 = layers.Dropout(dropout_rate)
-        self.dropout3 = layers.Dropout(dropout_rate)
+        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
+        self.dropout1 = nn.Dropout(dropout_rate)
+        self.dropout2 = nn.Dropout(dropout_rate)
+        self.dropout3 = nn.Dropout(dropout_rate)
 
-    def call(self, x, enc_output, look_ahead_mask, padding_mask, training=False):
+    def forward(self, x, enc_output, look_ahead_mask, padding_mask):
         attn1, attn_weights_block1 = self.mha1(v=x, k=x, q=x, mask=look_ahead_mask)
-        attn1 = self.dropout1(attn1, training=training)
+        attn1 = self.dropout1(attn1)
         out1 = self.layernorm1(x + attn1)
 
         attn2, attn_weights_block2 = self.mha2(v=enc_output, k=enc_output, q=out1, mask=padding_mask)
-        attn2 = self.dropout2(attn2, training=training)
+        attn2 = self.dropout2(attn2)
         out2 = self.layernorm2(out1 + attn2)
 
         ffn_output = self.ffn(out2)
-        ffn_output = self.dropout3(ffn_output, training=training)
+        ffn_output = self.dropout3(ffn_output)
         return self.layernorm3(out2 + ffn_output), attn_weights_block1, attn_weights_block2
+
+
+class Transformer(nn.Module):
+    """
+    Full encoder-decoder transformer.
+
+    forward(encoder_inputs, decoder_inputs) → logits of shape
+    (batch, target_seq_len, target_vocab_size).
+
+    Note: this model returns raw **logits**, not probabilities.
+    nn.CrossEntropyLoss applies the softmax internally, which is the standard
+    PyTorch pattern.
+    """
+
+    def __init__(
+        self,
+        input_vocab_size,
+        target_vocab_size,
+        num_layers,
+        d_model,
+        num_heads,
+        d_ff,
+        dropout_rate,
+        max_input_len,
+        max_target_len,
+    ):
+        super().__init__()
+        self.target_vocab_size = target_vocab_size
+
+        # Encoder: Embedding → Positional Encoding → Dropout → N × EncoderBlock
+        self.encoder_embedding = nn.Embedding(input_vocab_size, d_model)
+        self.encoder_pos_encoding = PositionalEncoding(max_length=max_input_len, d_model=d_model)
+        self.encoder_dropout = nn.Dropout(dropout_rate)
+        self.encoder_blocks = nn.ModuleList(
+            [EncoderBlock(d_model, num_heads, d_ff, dropout_rate) for _ in range(num_layers)]
+        )
+
+        # Decoder: Embedding → Positional Encoding → Dropout → N × DecoderBlock
+        self.decoder_embedding = nn.Embedding(target_vocab_size, d_model)
+        self.decoder_pos_encoding = PositionalEncoding(max_length=max_target_len, d_model=d_model)
+        self.decoder_dropout = nn.Dropout(dropout_rate)
+        self.decoder_blocks = nn.ModuleList(
+            [DecoderBlock(d_model, num_heads, d_ff, dropout_rate) for _ in range(num_layers)]
+        )
+
+        # Output projection to target vocabulary (logits — no softmax here)
+        self.final_layer = nn.Linear(d_model, target_vocab_size)
+
+    def forward(self, encoder_inputs, decoder_inputs):
+        # Build masks from the raw token ids
+        enc_padding_mask = create_padding_mask(encoder_inputs)
+        dec_combined_mask = create_decoder_mask(decoder_inputs)
+        dec_padding_mask = enc_padding_mask
+
+        # Encoder pass
+        x = self.encoder_embedding(encoder_inputs)
+        x = self.encoder_pos_encoding(x)
+        x = self.encoder_dropout(x)
+        for block in self.encoder_blocks:
+            x = block(x, enc_padding_mask)
+        enc_output = x
+
+        # Decoder pass
+        y = self.decoder_embedding(decoder_inputs)
+        y = self.decoder_pos_encoding(y)
+        y = self.decoder_dropout(y)
+        for block in self.decoder_blocks:
+            y, _, _ = block(y, enc_output, dec_combined_mask, dec_padding_mask)
+
+        return self.final_layer(y)
 
 
 def build_transformer_model(
@@ -950,37 +1070,19 @@ def build_transformer_model(
         max_target_len: Maximum target sequence length
 
     Returns:
-        Keras Model with inputs {"encoder_inputs", "decoder_inputs"}
+        PyTorch nn.Module — call as model(encoder_inputs, decoder_inputs),
+        returns logits of shape (batch, target_seq_len, target_vocab_size)
     """
-    encoder_inputs = keras.Input(shape=(max_input_len,), name="encoder_inputs")
-    decoder_inputs = keras.Input(shape=(max_target_len,), name="decoder_inputs")
-
-    enc_padding_mask = layers.Lambda(create_padding_mask)(encoder_inputs)
-    dec_combined_mask = layers.Lambda(create_decoder_mask)(decoder_inputs)
-    dec_padding_mask = enc_padding_mask
-
-    enc_emb = layers.Embedding(input_vocab_size, d_model, mask_zero=False)(encoder_inputs)
-    enc_emb = PositionalEncoding(max_length=max_input_len, d_model=d_model)(enc_emb)
-    x = layers.Dropout(dropout_rate)(enc_emb)
-
-    for _ in range(num_layers):
-        x = EncoderBlock(d_model, num_heads, d_ff, dropout_rate)(x, enc_padding_mask)
-    enc_output = x
-
-    dec_emb = layers.Embedding(target_vocab_size, d_model, mask_zero=False)(decoder_inputs)
-    dec_emb = PositionalEncoding(max_length=max_target_len, d_model=d_model)(dec_emb)
-    y = layers.Dropout(dropout_rate)(dec_emb)
-
-    for _ in range(num_layers):
-        y, _, _ = DecoderBlock(d_model, num_heads, d_ff, dropout_rate)(
-            y, enc_output, dec_combined_mask, dec_padding_mask
-        )
-
-    final_output = layers.Dense(target_vocab_size, activation="softmax")(y)
-
-    return keras.Model(
-        inputs={"encoder_inputs": encoder_inputs, "decoder_inputs": decoder_inputs},
-        outputs=final_output,
+    return Transformer(
+        input_vocab_size=input_vocab_size,
+        target_vocab_size=target_vocab_size,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        dropout_rate=dropout_rate,
+        max_input_len=max_input_len,
+        max_target_len=max_target_len,
     )
 
 
@@ -1046,8 +1148,8 @@ def generate_code_for_prompt(
 
     Args:
         prompt_text: Natural language prompt string
-        model: Trained transformer model
-        input_vectorizer: TextVectorization layer for prompts
+        model: Trained transformer model (PyTorch nn.Module)
+        input_vectorizer: TextVectorizer for prompts
         start_id: Token ID for [START]
         end_id: Token ID for [END]
         id_to_token: Dict mapping token ID → token string
@@ -1056,25 +1158,26 @@ def generate_code_for_prompt(
     Returns:
         Generated code string
     """
-    encoder_inputs = input_vectorizer([prompt_text]).numpy()
+    device = next(model.parameters()).device
+    model.eval()
+
+    encoder_inputs = torch.as_tensor(input_vectorizer([prompt_text]), dtype=torch.long, device=device)
     generated_tokens = [start_id]
 
-    for t in range(1, max_len):
-        current_length = len(generated_tokens)
-        decoder_inputs = np.zeros((1, max_len), dtype="int32")
-        decoder_inputs[0, :current_length] = generated_tokens
+    with torch.no_grad():
+        for t in range(1, max_len):
+            current_length = len(generated_tokens)
+            decoder_inputs = torch.zeros((1, max_len), dtype=torch.long, device=device)
+            decoder_inputs[0, :current_length] = torch.as_tensor(generated_tokens, dtype=torch.long, device=device)
 
-        preds = model(
-            {"encoder_inputs": encoder_inputs, "decoder_inputs": decoder_inputs},
-            training=False,
-        )
+            logits = model(encoder_inputs, decoder_inputs)
 
-        next_token_logits = preds[0, current_length - 1]
-        next_token_id = int(tf.argmax(next_token_logits).numpy())
-        generated_tokens.append(next_token_id)
+            next_token_logits = logits[0, current_length - 1]
+            next_token_id = int(torch.argmax(next_token_logits).item())
+            generated_tokens.append(next_token_id)
 
-        if next_token_id == end_id:
-            break
+            if next_token_id == end_id:
+                break
 
     return ids_to_code_text(generated_tokens[1:], id_to_token, start_token, end_token)
 
@@ -1098,8 +1201,8 @@ def generate_best(
 
     Args:
         prompt_text: Natural language prompt string
-        model: Trained transformer model
-        input_vectorizer: TextVectorization layer for prompts
+        model: Trained transformer model (PyTorch nn.Module)
+        input_vectorizer: TextVectorizer for prompts
         start_id: Token ID for [START]
         end_id: Token ID for [END]
         id_to_token: Dict mapping token ID → token string
@@ -1111,41 +1214,45 @@ def generate_best(
     Returns:
         Generated code string
     """
-    encoder_inputs = input_vectorizer([prompt_text]).numpy()
-    decoder_inputs = np.zeros((1, max_len), dtype="int32")
+    device = next(model.parameters()).device
+    model.eval()
+
+    encoder_inputs = torch.as_tensor(input_vectorizer([prompt_text]), dtype=torch.long, device=device)
+    decoder_inputs = torch.zeros((1, max_len), dtype=torch.long, device=device)
     decoder_inputs[0, 0] = start_id
     token_counts = {}
 
-    for t in range(1, max_len):
-        preds = model(
-            {"encoder_inputs": encoder_inputs, "decoder_inputs": decoder_inputs},
-            training=False,
-        )
-        next_token_logits = preds[0, t - 1].numpy()
+    with torch.no_grad():
+        for t in range(1, max_len):
+            logits = model(encoder_inputs, decoder_inputs)
+            # The model emits logits. Convert to probabilities first, because the
+            # repetition-penalty and temperature math below assumes probabilities.
+            next_token_logits = F.softmax(logits[0, t - 1], dim=-1).cpu().numpy()
 
-        for token_id, count in token_counts.items():
-            next_token_logits[token_id] = next_token_logits[token_id] / (repetition_penalty ** count)
+            for token_id, count in token_counts.items():
+                next_token_logits[token_id] = next_token_logits[token_id] / (repetition_penalty ** count)
 
-        next_token_logits[0] = -1e9  # suppress padding
-        next_token_logits = next_token_logits / temperature
-        next_token_probs = tf.nn.softmax(next_token_logits).numpy()
+            next_token_logits[0] = -1e9  # suppress padding
+            next_token_logits = next_token_logits / temperature
+            shifted = next_token_logits - next_token_logits.max()  # numerically stable softmax
+            next_token_probs = np.exp(shifted) / np.exp(shifted).sum()
 
-        sorted_indices = np.argsort(next_token_probs)[::-1]
-        sorted_probs = next_token_probs[sorted_indices]
-        cumsum_probs = np.cumsum(sorted_probs)
-        nucleus_size = np.searchsorted(cumsum_probs, top_p) + 1
-        nucleus_indices = sorted_indices[:nucleus_size]
-        nucleus_probs = sorted_probs[:nucleus_size]
-        nucleus_probs = nucleus_probs / nucleus_probs.sum()
+            sorted_indices = np.argsort(next_token_probs)[::-1]
+            sorted_probs = next_token_probs[sorted_indices]
+            cumsum_probs = np.cumsum(sorted_probs)
+            nucleus_size = np.searchsorted(cumsum_probs, top_p) + 1
+            nucleus_indices = sorted_indices[:nucleus_size]
+            nucleus_probs = sorted_probs[:nucleus_size]
+            nucleus_probs = nucleus_probs / nucleus_probs.sum()
 
-        next_token_id = np.random.choice(nucleus_indices, p=nucleus_probs)
-        token_counts[next_token_id] = token_counts.get(next_token_id, 0) + 1
-        decoder_inputs[0, t] = next_token_id
+            next_token_id = int(np.random.choice(nucleus_indices, p=nucleus_probs))
+            token_counts[next_token_id] = token_counts.get(next_token_id, 0) + 1
+            decoder_inputs[0, t] = next_token_id
 
-        if next_token_id == end_id:
-            break
+            if next_token_id == end_id:
+                break
 
-    return ids_to_code_text(decoder_inputs[0, 1:], id_to_token, start_token, end_token)
+    return ids_to_code_text(decoder_inputs[0, 1:].cpu().numpy(), id_to_token, start_token, end_token)
 
 
 # ============================================
@@ -1153,11 +1260,11 @@ def generate_best(
 # ============================================
 # Pre-generate code for all test prompts before BLEU scoring.
 # Two variants:
-#   - batch_generate_codes()      — HuggingFace model/tokenizer (PartB, PartC)
-#   - sequential_generate_codes() — custom TF transformer (PartA)
+#   - batch_generate_code()      — HuggingFace model/tokenizer (PartB, PartC)
+#   - sequential_generate_code() — custom PyTorch transformer (PartA)
 
 
-def batch_generate_codes(
+def batch_generate_code(
     prompts,
     model,
     tokenizer,
@@ -1172,7 +1279,7 @@ def batch_generate_codes(
 
     Args:
         prompts (list): List of natural language prompt strings
-        model: HuggingFace TF seq2seq model
+        model: HuggingFace PyTorch seq2seq model
         tokenizer: HuggingFace tokenizer matching the model
         batch_size (int): Number of prompts per batch
         max_length (int): Maximum number of tokens to generate
@@ -1181,35 +1288,38 @@ def batch_generate_codes(
     Returns:
         list: Generated code strings, one per prompt
     """
+    device = next(model.parameters()).device
+    model.eval()
+
     all_generated = []
     for i in tqdm(range(0, len(prompts), batch_size), desc="Batch generation"):
         batch = prompts[i:i + batch_size]
         inputs = tokenizer(
             batch,
-            return_tensors="tf",
+            return_tensors="pt",
             truncation=True,
             max_length=128,
             padding=True,
-        )
-        outputs = model.generate(
-            inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            max_length=max_length,
-            num_beams=num_beams,
-            early_stopping=True,
-            no_repeat_ngram_size=2,
-        )
-        for output in outputs:
-            all_generated.append(tokenizer.decode(output, skip_special_tokens=True))
+        ).to(device)
+        with torch.no_grad():
+            outputs = model.generate(
+                inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                max_length=max_length,
+                num_beams=num_beams,
+                early_stopping=True,
+                no_repeat_ngram_size=2,
+            )
+        all_generated.extend(tokenizer.batch_decode(outputs, skip_special_tokens=True))
     return all_generated
 
 
-def sequential_generate_codes(prompts, generate_fn, desc="Generating code"):
+def sequential_generate_code(prompts, generate_fn, desc="Generating code"):
     """
     Generate code for multiple prompts sequentially using a provided function.
 
-    Use this for custom TF transformers (PartA) where true batching is not
-    straightforward. Shows a tqdm progress bar during generation.
+    Use this for the custom PyTorch transformer (PartA) where true batching is
+    not straightforward. Shows a tqdm progress bar during generation.
 
     Args:
         prompts (list): List of natural language prompt strings
@@ -1224,10 +1334,192 @@ def sequential_generate_codes(prompts, generate_fn, desc="Generating code"):
 
 
 # ============================================
+# SECTION 9: CROSS-PART RESULTS HANDOFF
+# ============================================
+# Part C compares three models but trains only one. Parts A and B run in
+# separate notebooks (and, on Colab, separate sessions), so their results have
+# to be carried across. Two routes are supported:
+#
+#   1. a results file written by Parts A/B and read by Part C (works when the
+#      notebooks share a directory, which is the usual case running locally)
+#   2. a block of assignments printed by Parts A/B for the student to paste
+#      into Part C (works everywhere, including Colab)
+#
+# If neither is present, Part C falls back to the reference values written into
+# the notebook, and labels every output accordingly, so a comparison is never
+# presented as the student's own work when it is not.
+
+_RESULT_KEYS = ("bleu_mean", "bleu_min", "bleu_max", "syntax_pct")
+
+
+def _results_filename(part):
+    """Filename this module reads and writes for a given part ('A' or 'B')."""
+    return f"part{part.upper()}_results.json"
+
+
+def save_part_results(part, stats, out_dir=".", source=None):
+    """Save Part A/B results for Part C, and print a paste-able copy.
+
+    Writes ``partX_results.json`` next to the notebook and prints the same
+    numbers as assignment statements, so the results can travel either as a
+    file (local) or via copy and paste (Colab).
+
+    Args:
+        part (str): "A" or "B".
+        stats (dict): The stats dict from ``evaluate_model_with_bleu``; needs
+            'mean', 'min', 'max' and 'syntax_valid_pct'.
+        out_dir (str): Directory to write the file into. Defaults to the
+            working directory.
+        source (str): Provenance label recorded in the file. Defaults to
+            "my own runs", which is what lets Part C collapse the Part A and
+            Part B labels into one when both files are present.
+
+    Returns:
+        dict: The payload that was written.
+    """
+    import json
+    import os
+    from datetime import datetime
+
+    part = part.upper()
+    if part not in ("A", "B"):
+        raise ValueError(f"part must be 'A' or 'B', got {part!r}")
+
+    missing = [k for k in ("mean", "min", "max", "syntax_valid_pct") if k not in stats]
+    if missing:
+        raise KeyError(f"stats is missing {missing}; expected the dict from evaluate_model_with_bleu()")
+
+    payload = {
+        "part": part,
+        "source": source or "my own runs",
+        "run_at": datetime.now().isoformat(timespec="seconds"),
+        "metrics": {
+            "bleu_mean": float(stats["mean"]),
+            "bleu_min": float(stats["min"]),
+            "bleu_max": float(stats["max"]),
+            "syntax_pct": float(stats["syntax_valid_pct"]),
+        },
+    }
+
+    path = os.path.join(out_dir, _results_filename(part))
+    with open(path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+
+    m = payload["metrics"]
+    print(f"✅ Saved {path}")
+    print(f"   Part C picks this up automatically if it runs in the same folder.")
+    print()
+    where = "Part B (Step 6) and Part C (Step 8)" if part == "A" else "Part C (Step 8)"
+    print(f"   If you are on Colab, or running the later notebooks elsewhere,")
+    print(f"   copy these lines into {where}, over the values already there:")
+    print()
+    print(f'PART_{part}_RESULTS = {{"bleu_mean": {m["bleu_mean"]:.2f}, '
+          f'"bleu_min": {m["bleu_min"]:.2f}, "bleu_max": {m["bleu_max"]:.2f}, '
+          f'"syntax_pct": {m["syntax_pct"]:.1f}}}')
+    print('RESULTS_SOURCE = "my own runs"')
+    print()
+    return payload
+
+
+def _load_one(part, search_dir):
+    """Return (metrics, label) from a results file, or (None, None)."""
+    import json
+    import os
+
+    path = os.path.join(search_dir, _results_filename(part))
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path) as fh:
+            payload = json.load(fh)
+        metrics = payload["metrics"]
+        missing = [k for k in _RESULT_KEYS if k not in metrics]
+        if missing:
+            print(f"⚠️  {path} is missing {missing}; ignoring it.")
+            return None, None
+        # Keep the label short: it is printed beside every result and appears in
+        # a chart legend, so the full path and timestamp would swamp both.
+        run_day = str(payload.get("run_at", "unknown"))[:10]
+        label = f"{payload.get('source', 'unknown run')} (file, {run_day})"
+        return {k: float(metrics[k]) for k in _RESULT_KEYS}, label
+    except Exception as exc:
+        print(f"⚠️  Could not read {path} ({type(exc).__name__}: {exc}); ignoring it.")
+        return None, None
+
+
+def load_part_results(part, reference, reference_source, search_dir="."):
+    """Load one earlier part's results, falling back to the values passed in.
+
+    Part B needs Part A's numbers; Part C needs both. This is the single-part
+    version, used by Part B directly and by ``resolve_part_results`` for each of
+    the two parts it resolves.
+
+    Args:
+        part (str): "A" or "B", the part whose results file to look for.
+        reference (dict): Values to use when no file is found. Needs the keys
+            'bleu_mean', 'bleu_min', 'bleu_max', 'syntax_pct'.
+        reference_source (str): Label describing where `reference` came from.
+        search_dir (str): Directory to look for the results file in.
+
+    Returns:
+        tuple: (values, source_label).
+    """
+    missing = [k for k in _RESULT_KEYS if k not in reference]
+    if missing:
+        raise KeyError(f"reference is missing {missing}; expected keys {list(_RESULT_KEYS)}")
+    from_file, label = _load_one(part, search_dir)
+    if from_file:
+        return from_file, label
+    return dict(reference), reference_source
+
+
+def warn_if_reference(source, reference_source):
+    """Print a warning when results are still the instructor's, not the student's."""
+    if source == reference_source and reference_source.lower().startswith("instructor"):
+        print()
+        print("⚠️  These are the INSTRUCTOR'S numbers, not yours. Before submitting,")
+        print("    run the earlier parts and either keep their results files next to")
+        print("    this notebook, or paste the block they print over the values above.")
+
+
+def resolve_part_results(part_a, part_b, reference_source, search_dir="."):
+    """Resolve the Part A and Part B results Part C compares against.
+
+    Priority: a results file written by Parts A/B, else the values passed in
+    (either the reference values in the notebook, or ones the student pasted).
+
+    Args:
+        part_a (dict): Part A values, keys 'bleu_mean', 'bleu_min', 'bleu_max',
+            'syntax_pct'.
+        part_b (dict): Part B values, same keys.
+        reference_source (str): Label describing where the passed-in values
+            came from, e.g. "instructor reference run".
+        search_dir (str): Directory to look for results files in.
+
+    Returns:
+        tuple: (part_a, part_b, source_label). The label names whichever source
+        actually supplied the numbers and is printed alongside every result.
+    """
+    resolved_a, label_a = load_part_results("A", part_a, reference_source, search_dir)
+    resolved_b, label_b = load_part_results("B", part_b, reference_source, search_dir)
+
+    if label_a == label_b:
+        # Both from the same place, which is the normal case: one label reads
+        # better than "A: x | B: x".
+        source = label_a
+    else:
+        source = f"A: {label_a} | B: {label_b}"
+
+    print(f"Parts A & B source: {source}")
+    warn_if_reference(source, reference_source)
+    return resolved_a, resolved_b, source
+
+
+# ============================================
 # MODULE INFO
 # ============================================
 
-__version__ = "1.0.1"
+__version__ = "2.2.0"
 __all__ = [
     # Configuration
     "DATASET",
@@ -1247,6 +1539,8 @@ __all__ = [
     "analyze_bleu_results",
     # Training utilities (Section 5)
     "plot_training_history",
+    # Text vectorization (Section 5B)
+    "TextVectorizer",
     # Transformer building blocks (Section 6)
     "PositionalEncoding",
     "ScaledDotProductAttention",
@@ -1257,6 +1551,7 @@ __all__ = [
     "point_wise_feed_forward_network",
     "EncoderBlock",
     "DecoderBlock",
+    "Transformer",
     "build_transformer_model",
     # Decoding & generation (Section 7)
     "ids_to_code_text",
@@ -1264,8 +1559,13 @@ __all__ = [
     "generate_code_for_prompt",
     "generate_best",
     # Batch generation utilities (Section 8)
-    "batch_generate_codes",
-    "sequential_generate_codes",
+    "batch_generate_code",
+    "sequential_generate_code",
+    # Cross-part results handoff (Section 9)
+    "save_part_results",
+    "load_part_results",
+    "resolve_part_results",
+    "warn_if_reference",
 ]
 
 print(f"✅ assignment3_utils v{__version__} loaded successfully")

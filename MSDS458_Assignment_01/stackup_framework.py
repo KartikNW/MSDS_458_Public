@@ -32,7 +32,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import r2_score, mean_absolute_error
-import tensorflow as tf
+import torch
+import torch.nn as nn
 
 # %%
 # Import the utility module
@@ -75,9 +76,10 @@ class DiamondPriceStackup:
         """
         # Preprocess features using classifier preprocessor
         X_processed = self.preprocessors['classifier'].transform(X)
-        
-        # Get tier predictions
-        tier_probs = self.classifier_model.predict(X_processed)
+
+        # Get tier predictions (model outputs logits; softmax converts to probabilities)
+        tier_logits = du.predict(self.classifier_model, X_processed)
+        tier_probs = torch.softmax(torch.as_tensor(tier_logits), dim=1).numpy()
         tier_preds = np.argmax(tier_probs, axis=1)
         
         # Convert back to tier names
@@ -108,7 +110,7 @@ class DiamondPriceStackup:
             X_tier_processed = self.preprocessors[tier].transform(X_tier)
             
             # Get price prediction from tier-specific model
-            price_pred = self.regression_models[tier].predict(X_tier_processed)[0]
+            price_pred = du.predict(self.regression_models[tier], X_tier_processed).ravel()[0]
             price_predictions[i] = price_pred
             
             # Use classifier confidence as confidence score
@@ -150,7 +152,7 @@ class DiamondPriceStackup:
                 X_tier_processed = self.preprocessors[tier].transform(X_tier)
                 
                 # Get predictions from tier-specific model
-                tier_predictions = self.regression_models[tier].predict(X_tier_processed)
+                tier_predictions = du.predict(self.regression_models[tier], X_tier_processed).ravel()
                 
                 # Store results
                 for j, idx in enumerate(indices):
@@ -295,9 +297,6 @@ def train_tier_regression_models(
             - preprocessors: dict with keys 'low', 'medium', 'high'
             - histories: dict with keys 'low', 'medium', 'high'
     """
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import Dense, Input
-
     low_data, medium_data, high_data = du.split_data(
         diamonds_train, low_threshold=low_threshold, high_threshold=high_threshold
     )
@@ -315,34 +314,27 @@ def train_tier_regression_models(
         )
         preprocessors[tier] = preprocessor
 
+        y_np = y_processed.values if hasattr(y_processed, 'values') else np.asarray(y_processed)
         X_train, X_val, y_train, y_val = train_test_split(
-            X_processed, y_processed, test_size=0.2, random_state=random_state
+            X_processed, y_np, test_size=0.2, random_state=random_state
         )
 
         layers_list = []
-        layers_list.append(Input(shape=(X_train.shape[1],)))
+        prev_units = X_train.shape[1]
         for units in cfg['layers']:
-            layers_list.append(Dense(units, activation='relu'))
-        layers_list.append(Dense(1))
+            layers_list.append(nn.Linear(prev_units, units))
+            layers_list.append(nn.ReLU())
+            prev_units = units
+        layers_list.append(nn.Linear(prev_units, 1))
 
-        tier_model = Sequential(layers_list)
-        tier_model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=cfg.get('lr', 0.001)),
-            loss='mse',
-            metrics=['mae', 'mape'],
-        )
+        tier_model = nn.Sequential(*layers_list)
 
-        history = tier_model.fit(
-            X_train, y_train,
+        history = du.fit_regression(
+            tier_model, X_train, y_train, X_val, y_val,
+            lr=cfg.get('lr', 0.001),
             epochs=cfg.get('epochs', 50),
             batch_size=cfg.get('batch_size', 32),
-            validation_data=(X_val, y_val),
-            verbose=1,
-            callbacks=[tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=cfg.get('patience', 3),
-                restore_best_weights=True,
-            )],
+            patience=cfg.get('patience', 3),
         )
 
         models[tier] = tier_model
@@ -387,9 +379,6 @@ def train_tier_classifier(
     Returns:
         tuple: (classifier_model, preprocessor, history)
     """
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import Dense, Input, Dropout
-
     diamonds_tiers_train = du.create_price_tiers(
         diamonds_train, low_threshold=low_threshold, high_threshold=high_threshold
     )
@@ -404,34 +393,33 @@ def train_tier_classifier(
     dropout_rate = cfg.get('dropout', 0.0)
 
     layers_list = []
-    layers_list.append(Input(shape=(X_train.shape[1],)))
+    prev_units = X_train.shape[1]
     for units in cfg['layers']:
-        layers_list.append(Dense(units, activation='relu'))
+        layers_list.append(nn.Linear(prev_units, units))
+        layers_list.append(nn.ReLU())
         if dropout_rate > 0:
-            layers_list.append(Dropout(dropout_rate))
-    layers_list.append(Dense(3, activation='softmax'))
+            layers_list.append(nn.Dropout(dropout_rate))
+        prev_units = units
+    # Output layer emits logits (no softmax) — CrossEntropyLoss applies it
+    layers_list.append(nn.Linear(prev_units, 3))
 
-    classifier_model = Sequential(layers_list)
-    classifier_model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=cfg.get('lr', 0.001)),
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy'],
-    )
-    classifier_model.summary()
+    classifier_model = nn.Sequential(*layers_list)
+    print(classifier_model)
 
-    history = classifier_model.fit(
-        X_train, y_train,
+    history = du.fit_classifier(
+        classifier_model, X_train, y_train, X_test, y_test,
+        lr=cfg.get('lr', 0.001),
         epochs=cfg.get('epochs', 50),
         batch_size=cfg.get('batch_size', 32),
-        validation_data=(X_test, y_test),
-        callbacks=[tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=cfg.get('patience', 10),
-            restore_best_weights=True,
-        )],
+        patience=cfg.get('patience', 10),
     )
 
-    loss, accuracy = classifier_model.evaluate(X_test, y_test)
+    # Final evaluation on the held-out split
+    logits = du.predict(classifier_model, X_test)
+    y_test_np = np.asarray(y_test)
+    loss = nn.CrossEntropyLoss()(torch.as_tensor(logits),
+                                 torch.as_tensor(y_test_np, dtype=torch.long)).item()
+    accuracy = np.mean(np.argmax(logits, axis=1) == y_test_np)
     print(f"Classifier — Test Loss: {loss:.4f}, Test Accuracy: {accuracy:.4f}")
 
     return classifier_model, preprocessor, history

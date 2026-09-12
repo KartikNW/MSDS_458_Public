@@ -12,19 +12,6 @@ Author: MSDS 458 Collaboration
 """
 
 import os
-# Configure environment BEFORE importing TensorFlow
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-# GPU toggle via environment variables (default: ENABLE GPU)
-# Preferred: set DIAMONDS_DISABLE_GPU to: 1, true, yes, on (disables GPU)
-_disable_gpu = os.getenv('DIAMONDS_DISABLE_GPU', '').strip().lower() in {"1", "true", "yes", "on"}
-if (not _disable_gpu) and ('DIAMONDS_USE_GPU' in os.environ):
-    _use_gpu_flag = os.getenv('DIAMONDS_USE_GPU', '').strip().lower()
-    _disable_gpu = _use_gpu_flag in {"0", "false", "no", "off"}
-
-if _disable_gpu:
-    # Hide all CUDA/Metal GPUs from TensorFlow before import
-    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import seaborn as sns
 import sys
 from packaging import version
@@ -36,17 +23,26 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import r2_score, mean_absolute_error
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Input, Dropout
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
 
-# Enforce device visibility after import as well
-try:
-    if _disable_gpu:
-        tf.config.set_visible_devices([], 'GPU')
-except Exception:
-    # Safe to ignore if no GPU devices are present or already initialized
-    pass
+
+def get_device():
+    """Select the best available torch device (CUDA → MPS → CPU).
+
+    Set DIAMONDS_DISABLE_GPU to 1/true/yes/on, or DIAMONDS_USE_GPU to
+    0/false/no/off, to force CPU.
+    """
+    if os.getenv('DIAMONDS_DISABLE_GPU', '').strip().lower() in {"1", "true", "yes", "on"}:
+        return torch.device('cpu')
+    if os.getenv('DIAMONDS_USE_GPU', '').strip().lower() in {"0", "false", "no", "off"}:
+        return torch.device('cpu')
+    return torch.device('cuda' if torch.cuda.is_available()
+                        else 'mps' if torch.backends.mps.is_available()
+                        else 'cpu')
+
+_default_device = get_device()
 
 def load_data():
     """Load the diamonds dataset from Seaborn's built-in datasets.
@@ -160,55 +156,267 @@ def analyze_correlations(diamonds):
     plt.show()
 
 def create_model(input_dim):
-    """Create and compile the neural network model for price prediction.
+    """Create the neural network model for price prediction.
 
     Args:
         input_dim (int): Number of input features
 
     Returns:
-        tensorflow.keras.Model: Compiled neural network model
+        torch.nn.Module: Neural network model (not yet moved to a device)
     """
-    model = Sequential([
-        Input(shape=(input_dim,)),
-        Dense(128, activation='relu'),
-        Dense(64, activation='relu'),
-        Dense(32, activation='relu'),
-        Dense(1)
-    ])
-
-    model.compile(
-        optimizer='adam',
-        loss='mse',
-        metrics=['mae','mape']
+    model = nn.Sequential(
+        nn.Linear(input_dim, 128), nn.ReLU(),
+        nn.Linear(128, 64), nn.ReLU(),
+        nn.Linear(64, 32), nn.ReLU(),
+        nn.Linear(32, 1)
     )
-
     return model
 
 def create_classifier_model(input_dim, num_classes):
-    """Create and compile a DNN classifier for price tier prediction.
+    """Create a DNN classifier for price tier prediction.
+
+    The output layer emits raw logits (no softmax) because
+    nn.CrossEntropyLoss applies softmax internally.
 
     Args:
         input_dim (int): Number of input features
         num_classes (int): Number of output classes
 
     Returns:
-        tensorflow.keras.Model: Compiled classifier model
+        torch.nn.Module: Classifier model (not yet moved to a device)
     """
-    model = Sequential([
-        Input(shape=(input_dim,)),
-        Dense(256, activation='relu'),
-        Dropout(0.2),
-        Dense(128, activation='relu'),
-        Dropout(0.2),
-        Dense(64, activation='relu'),
-        Dense(num_classes, activation='softmax')
-    ])
-    model.compile(
-        optimizer='adam',
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
+    model = nn.Sequential(
+        nn.Linear(input_dim, 256), nn.ReLU(),
+        nn.Dropout(0.2),
+        nn.Linear(256, 128), nn.ReLU(),
+        nn.Dropout(0.2),
+        nn.Linear(128, 64), nn.ReLU(),
+        nn.Linear(64, num_classes)
     )
     return model
+
+
+class HistoryObject:
+    """Per-epoch metrics exposed as a `.history` dict.
+
+    This is the shape `plot_training_history()` expects, so the training
+    functions below return one of these rather than a bare dict.
+    """
+    def __init__(self, history):
+        self.history = history
+
+
+def predict(model, X, device=None):
+    """Run a forward pass on numpy features and return a numpy array.
+
+    Works for both torch nn.Module models and sklearn models.
+
+    Args:
+        model: Trained model (torch nn.Module or sklearn)
+        X (numpy.ndarray): Input features
+        device: torch device (defaults to the model's own device)
+
+    Returns:
+        numpy.ndarray: Model outputs
+    """
+    if isinstance(model, nn.Module):
+        device = device or next(model.parameters()).device
+        model.eval()
+        with torch.no_grad():
+            X_tensor = torch.as_tensor(np.asarray(X, dtype=np.float32)).to(device)
+            return model(X_tensor).cpu().numpy()
+    return model.predict(X)
+
+
+def fit_regression(model, X_train, y_train, X_val, y_val,
+                   lr=0.001, epochs=50, batch_size=32, patience=10,
+                   device=None, verbose=True):
+    """Train a regression model with the standard PyTorch training loop.
+
+    Uses Adam + MSE loss with early stopping and best-weight restore, so the
+    returned model is the best one seen, not the one from the final epoch.
+
+    Args:
+        model (torch.nn.Module): Model to train (modified in place)
+        X_train, y_train: Training features and targets (numpy)
+        X_val, y_val: Validation features and targets (numpy)
+        lr (float): Learning rate for Adam
+        epochs (int): Maximum number of epochs
+        batch_size (int): Mini-batch size
+        patience (int): Early stopping patience (epochs without val_loss improvement)
+        device: torch device, defaults to best available
+        verbose (bool): Print per-epoch metrics
+
+    Returns:
+        HistoryObject: per-epoch loss/mae/mape (+ val_ versions)
+    """
+    device = device or _default_device
+    model = model.to(device)
+
+    y_train = np.asarray(y_train, dtype=np.float32).reshape(-1, 1)
+    y_val = np.asarray(y_val, dtype=np.float32).reshape(-1, 1)
+
+    train_loader = DataLoader(
+        TensorDataset(torch.as_tensor(np.asarray(X_train, dtype=np.float32)),
+                      torch.as_tensor(y_train)),
+        batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(
+        TensorDataset(torch.as_tensor(np.asarray(X_val, dtype=np.float32)),
+                      torch.as_tensor(y_val)),
+        batch_size=batch_size, shuffle=False)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+
+    history = {'loss': [], 'mae': [], 'mape': [],
+               'val_loss': [], 'val_mae': [], 'val_mape': []}
+    best_val_loss, patience_counter, best_state = float('inf'), 0, None
+
+    def _epoch_metrics(loader, training):
+        total_loss = total_mae = total_mape = 0.0
+        n_samples = 0
+        for X_batch, y_batch in loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            if training:
+                optimizer.zero_grad()
+                outputs = model(X_batch)
+                loss = criterion(outputs, y_batch)
+                loss.backward()
+                optimizer.step()
+            else:
+                outputs = model(X_batch)
+                loss = criterion(outputs, y_batch)
+            # Weight by batch size so a short final batch does not skew the epoch
+            # average. The epoch metric is a sample-weighted mean, not a mean of
+            # per-batch means, which differ whenever the last batch is short.
+            batch_size_actual = y_batch.size(0)
+            total_loss += loss.item() * batch_size_actual
+            total_mae += torch.sum(torch.abs(outputs - y_batch)).item()
+            total_mape += torch.sum(torch.abs((y_batch - outputs) / y_batch)).item() * 100
+            n_samples += batch_size_actual
+        return total_loss / n_samples, total_mae / n_samples, total_mape / n_samples
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss, train_mae, train_mape = _epoch_metrics(train_loader, training=True)
+
+        model.eval()
+        with torch.no_grad():
+            val_loss, val_mae, val_mape = _epoch_metrics(val_loader, training=False)
+
+        history['loss'].append(train_loss); history['mae'].append(train_mae)
+        history['mape'].append(train_mape)
+        history['val_loss'].append(val_loss); history['val_mae'].append(val_mae)
+        history['val_mape'].append(val_mape)
+
+        if verbose:
+            print(f"Epoch {epoch+1}/{epochs} - loss: {train_loss:.4f} - mae: {train_mae:.4f} - "
+                  f"val_loss: {val_loss:.4f} - val_mae: {val_mae:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss, patience_counter = val_loss, 0
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                if verbose:
+                    print(f"Early stopping triggered after epoch {epoch+1}")
+                break
+
+    if best_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+
+    return HistoryObject(history)
+
+
+def fit_classifier(model, X_train, y_train, X_val, y_val,
+                   lr=0.001, epochs=50, batch_size=32, patience=10,
+                   device=None, verbose=True):
+    """Train a classifier with the standard PyTorch training loop.
+
+    Uses Adam + CrossEntropyLoss (expects integer class labels and a model
+    that outputs logits) with early stopping and best-weight restore.
+
+    Args:
+        model (torch.nn.Module): Model to train (modified in place)
+        X_train, y_train: Training features and integer labels (numpy)
+        X_val, y_val: Validation features and integer labels (numpy)
+        lr (float): Learning rate for Adam
+        epochs (int): Maximum number of epochs
+        batch_size (int): Mini-batch size
+        patience (int): Early stopping patience (epochs without val_loss improvement)
+        device: torch device, defaults to best available
+        verbose (bool): Print per-epoch metrics
+
+    Returns:
+        HistoryObject: per-epoch loss/accuracy (+ val_ versions)
+    """
+    device = device or _default_device
+    model = model.to(device)
+
+    train_loader = DataLoader(
+        TensorDataset(torch.as_tensor(np.asarray(X_train, dtype=np.float32)),
+                      torch.as_tensor(np.asarray(y_train), dtype=torch.long)),
+        batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(
+        TensorDataset(torch.as_tensor(np.asarray(X_val, dtype=np.float32)),
+                      torch.as_tensor(np.asarray(y_val), dtype=torch.long)),
+        batch_size=batch_size, shuffle=False)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    history = {'loss': [], 'accuracy': [], 'val_loss': [], 'val_accuracy': []}
+    best_val_loss, patience_counter, best_state = float('inf'), 0, None
+
+    def _epoch_metrics(loader, training):
+        total_loss = 0.0
+        correct = total = 0
+        for X_batch, y_batch in loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            if training:
+                optimizer.zero_grad()
+                logits = model(X_batch)
+                loss = criterion(logits, y_batch)
+                loss.backward()
+                optimizer.step()
+            else:
+                logits = model(X_batch)
+                loss = criterion(logits, y_batch)
+            total_loss += loss.item() * y_batch.size(0)
+            correct += (logits.argmax(dim=1) == y_batch).sum().item()
+            total += len(y_batch)
+        return total_loss / total, correct / total
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss, train_acc = _epoch_metrics(train_loader, training=True)
+
+        model.eval()
+        with torch.no_grad():
+            val_loss, val_acc = _epoch_metrics(val_loader, training=False)
+
+        history['loss'].append(train_loss); history['accuracy'].append(train_acc)
+        history['val_loss'].append(val_loss); history['val_accuracy'].append(val_acc)
+
+        if verbose:
+            print(f"Epoch {epoch+1}/{epochs} - loss: {train_loss:.4f} - accuracy: {train_acc:.4f} - "
+                  f"val_loss: {val_loss:.4f} - val_accuracy: {val_acc:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss, patience_counter = val_loss, 0
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                if verbose:
+                    print(f"Early stopping triggered after epoch {epoch+1}")
+                break
+
+    if best_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+
+    return HistoryObject(history)
 
 def _select_feature_columns(diamonds, numerical_features, categorical_features, target):
     """Validate the feature lists and return an explicit feature-only DataFrame (allowlist).
@@ -229,7 +437,7 @@ def _select_feature_columns(diamonds, numerical_features, categorical_features, 
         raise ValueError(
             f"prepare_data(): target '{target}' is listed as a feature "
             f"{numerical_features=} {categorical_features=}. Remove it from the feature "
-            f"lists — using the target as an input is data leakage."
+            f"lists \u2014 using the target as an input is data leakage."
         )
 
     numerical_present = [c for c in numerical_features if c in diamonds.columns]
@@ -237,7 +445,7 @@ def _select_feature_columns(diamonds, numerical_features, categorical_features, 
     missing = [c for c in (list(numerical_features) + list(categorical_features))
                if c not in diamonds.columns]
     if missing:
-        print(f"⚠️  prepare_data(): named feature column(s) not in dataframe, skipping: {missing}")
+        print(f"\u26a0\ufe0f  prepare_data(): named feature column(s) not in dataframe, skipping: {missing}")
 
     # Allowlist: only the named feature columns become inputs; any other column in the
     # dataframe is never passed through.
@@ -349,6 +557,8 @@ def prepare_data_without_split(diamonds, numerical_features, categorical_feature
 def train_model(X_train, y_train, patience=10, epochs=50):
     """Train the neural network model on the prepared data.
 
+    Holds out 20% of the training data for validation.
+
     Args:
         X_train (numpy.ndarray): Training features
         y_train (numpy.ndarray): Training targets
@@ -360,18 +570,14 @@ def train_model(X_train, y_train, patience=10, epochs=50):
     """
     model = create_model(X_train.shape[1])
 
-    # Train the model
-    history = model.fit(
-        X_train, y_train,
-        epochs=epochs,
-        batch_size=32,
-        validation_split=0.2,
-        verbose=1,
-        callbacks=[tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=patience,
-            restore_best_weights=True
-        )]
+    y_np = y_train.values if hasattr(y_train, 'values') else np.asarray(y_train)
+    X_tr, X_val, y_tr, y_val = train_test_split(
+        X_train, y_np, test_size=0.2, random_state=42
+    )
+
+    history = fit_regression(
+        model, X_tr, y_tr, X_val, y_val,
+        epochs=epochs, batch_size=32, patience=patience
     )
 
     return model, history
@@ -380,14 +586,16 @@ def plot_training_history(history):
     """Plot the training history of the model, showing loss and MAE over epochs.
 
     Args:
-        history (tensorflow.keras.callbacks.History): Training history object
+        history: HistoryObject (or plain dict) of per-epoch metrics
     """
+    h = history.history if hasattr(history, 'history') else history
+
     plt.figure(figsize=(12, 4))
 
     # Plot loss
     plt.subplot(1, 2, 1)
-    plt.plot(history.history['loss'], label='Training Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.plot(h['loss'], label='Training Loss')
+    plt.plot(h['val_loss'], label='Validation Loss')
     plt.title('Model Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -395,8 +603,8 @@ def plot_training_history(history):
 
     # Plot MAE
     plt.subplot(1, 2, 2)
-    plt.plot(history.history['mae'], label='Training MAE')
-    plt.plot(history.history['val_mae'], label='Validation MAE')
+    plt.plot(h['mae'], label='Training MAE')
+    plt.plot(h['val_mae'], label='Validation MAE')
     plt.title('Model MAE')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
@@ -409,7 +617,7 @@ def evaluate_model(model, X_test, y_test):
     """Evaluate the model's performance using various metrics and visualizations.
 
     Args:
-        model: Trained model (TensorFlow or scikit-learn)
+        model: Trained model (PyTorch or scikit-learn)
         X_test (numpy.ndarray): Test features
         y_test (numpy.ndarray): Test targets
 
@@ -417,20 +625,13 @@ def evaluate_model(model, X_test, y_test):
         numpy.ndarray: Predicted values
     """
     # Evaluate the model
-    if hasattr(model, 'evaluate'):  # TensorFlow model
-        evaluation_results = model.evaluate(X_test, y_test)
-        if len(evaluation_results) == 3:  # loss, mae, mape
-            test_loss, test_mae, test_mape = evaluation_results
-            print(f"\nTest MAE: ${test_mae:.2f}")
-            print(f"Test MAPE: {test_mape:.2f}%")
-        elif len(evaluation_results) == 2:  # loss, mae (fallback)
-            test_loss, test_mae = evaluation_results
-            print(f"\nTest MAE: ${test_mae:.2f}")
-        y_pred = model.predict(X_test)
-    else:  # Scikit-learn model
-        y_pred = model.predict(X_test)
-        test_mae = mean_absolute_error(y_test, y_pred)
-        print(f"\nTest MAE: ${test_mae:.2f}")
+    y_pred = predict(model, X_test).ravel()
+    y_true = np.asarray(y_test)
+    test_mae = mean_absolute_error(y_true, y_pred)
+    print(f"\nTest MAE: ${test_mae:.2f}")
+    if isinstance(model, nn.Module):
+        test_mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+        print(f"Test MAPE: {test_mape:.2f}%")
 
     # Calculate R-squared score
     r2 = r2_score(y_test, y_pred)
